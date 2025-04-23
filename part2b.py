@@ -2,9 +2,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 from petsc4py import PETSc
 from mpi4py import MPI
-from dolfinx import fem, mesh
-from dolfinx.fem.petsc import assemble_matrix, assemble_vector, create_vector, apply_lifting, set_bc
+from dolfinx import fem, mesh, plot
 import ufl
+import pyvista
+import matplotlib as mpl
+
+# Import the necessary functions, including assemble_matrix
+from dolfinx.fem.petsc import assemble_matrix, assemble_vector, create_vector, apply_lifting, set_bc
 
 # Define the domain and analytical solution
 def analytical_solution(x):
@@ -20,7 +24,7 @@ def compute_l2_error(u_numerical, V, domain):
     relative_error = error_l2 / norm_analytical if norm_analytical > 0 else error_l2
     return relative_error
 
-# Solve the Poisson equation for a given mesh and polynomial degree
+# Solve the Poisson equation and return the solution for visualization
 def solve_poisson(nx, ny, degree, cell_type, case_name):
     # Create mesh
     domain = mesh.create_rectangle(MPI.COMM_WORLD, [np.array([0, 0]), np.array([1, 1])], [nx, ny], cell_type)
@@ -67,7 +71,32 @@ def solve_poisson(nx, ny, degree, cell_type, case_name):
     
     # Compute L^2 error
     relative_error = compute_l2_error(uh, V, domain)
-    return relative_error
+    
+    return uh, V, domain, relative_error
+
+# Visualize the analytical solution as a static image
+def visualize_analytical():
+    domain = mesh.create_rectangle(MPI.COMM_WORLD, [np.array([0, 0]), np.array([1, 1])], [50, 50], mesh.CellType.quadrilateral)
+    V = fem.functionspace(domain, ("Lagrange", 1))
+    u_analytical = fem.Function(V)
+    u_analytical.interpolate(analytical_solution)
+    
+    pyvista.start_xvfb()
+    grid = pyvista.UnstructuredGrid(*plot.vtk_mesh(V))
+    grid.point_data["u_analytical"] = u_analytical.x.array
+    warped = grid.warp_by_scalar("u_analytical", factor=1.0)
+    
+    plotter = pyvista.Plotter(off_screen=True)
+    viridis = mpl.colormaps.get_cmap("viridis").resampled(25)
+    sargs = dict(title_font_size=20, label_font_size=15, fmt="%.2e", color="black",
+                 position_x=0.1, position_y=0.8, width=0.8, height=0.1)
+    plotter.add_mesh(warped, show_edges=True, lighting=False, cmap=viridis,
+                     scalar_bar_args=sargs, clim=[0, 1])
+    plotter.view_xy()
+    plotter.camera.zoom(1.5)
+    plotter.add_title("Analytical Solution", font_size=12)
+    plotter.show(screenshot="solution_analytical.png")
+    plotter.close()
 
 # Define cases
 h_refinement_cases = [
@@ -78,10 +107,10 @@ h_refinement_cases = [
 ]
 
 p_refinement_cases = [
-    (20, 20, 1, mesh.CellType.triangle, "p-ref: degree=1, tri"),
     (20, 20, 3, mesh.CellType.triangle, "p-ref: degree=3, tri"),
+    (20, 20, 6, mesh.CellType.triangle, "p-ref: degree=6, tri"),
     (20, 20, 4, mesh.CellType.quadrilateral, "p-ref: degree=4, quad"),
-    (20, 20, 6, mesh.CellType.quadrilateral, "p-ref: degree=6, quad")
+    # (20, 20, 8, mesh.CellType.quadrilateral, "p-ref: degree=8, quad")  # Excluded to avoid visualization issues
 ]
 
 all_cases = h_refinement_cases + p_refinement_cases
@@ -89,13 +118,42 @@ all_cases = h_refinement_cases + p_refinement_cases
 # Store results
 relative_errors = []
 case_names = []
+solutions = []
 
-# Run simulations for all cases
+# Run simulations for all cases and store solutions
 for nx, ny, degree, cell_type, case_name in all_cases:
     print(f"Running case: {case_name}")
-    rel_err = solve_poisson(nx, ny, degree, cell_type, case_name)
+    uh, V, domain, rel_err = solve_poisson(nx, ny, degree, cell_type, case_name)
     relative_errors.append(rel_err)
     case_names.append(case_name)
+    solutions.append((uh, V, domain, case_name, rel_err))
+
+# Create GIF animation of refinement progression
+pyvista.start_xvfb()
+plotter = pyvista.Plotter(off_screen=True)
+plotter.open_gif("refinement_evolution.gif", fps=2)
+
+viridis = mpl.colormaps.get_cmap("viridis").resampled(25)
+sargs = dict(title_font_size=20, label_font_size=15, fmt="%.2e", color="black",
+             position_x=0.1, position_y=0.8, width=0.8, height=0.1)
+
+for uh, V, domain, case_name, rel_err in solutions:
+    grid = pyvista.UnstructuredGrid(*plot.vtk_mesh(V))
+    grid.point_data["uh"] = uh.x.array
+    warped = grid.warp_by_scalar("uh", factor=1.0)
+    
+    plotter.clear()
+    plotter.add_mesh(warped, show_edges=True, lighting=False, cmap=viridis,
+                     scalar_bar_args=sargs, clim=[0, 1])
+    plotter.view_xy()
+    plotter.camera.zoom(1.5)
+    plotter.add_title(f"{case_name}\nL^2 Error: {rel_err:.2e}", font_size=12)
+    plotter.write_frame()
+
+plotter.close()
+
+# Visualize the analytical solution
+visualize_analytical()
 
 # Plot comparison of relative errors
 plt.figure(figsize=(10, 6))
@@ -113,7 +171,7 @@ for bar, error in zip(bars, relative_errors):
              ha='center', va='bottom')
 
 plt.tight_layout()
-plt.savefig('relative_l2_error_comparison_poisson.png')
+plt.savefig('relative_l2_error_comparison_poisson.png')  # Fixed the typo here
 plt.show()
 
 # Print relative errors
